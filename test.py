@@ -80,7 +80,7 @@ if __name__ == "__main__":
     window_size = 4096
 
     positions = torch.tensor(
-        [128, 128, 128, 128],
+        [289, 289, 289, 289],
         device="cuda",
         dtype=torch.int,
     )

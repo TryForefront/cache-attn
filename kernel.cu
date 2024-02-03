@@ -160,8 +160,8 @@ __global__ void stage_one(const half16 *Q, const half16 *K, const int *positions
 
     __shared__ half16 shared_Q[head_size / vector_size];
 
-    const int start_s = blockIdx.z * SEQ_CHUNK_SIZE;
-    const int end_s = min(start_s + SEQ_CHUNK_SIZE, seq_len);
+    int start_s = blockIdx.z * SEQ_CHUNK_SIZE;
+    int end_s = min(start_s + SEQ_CHUNK_SIZE, seq_len);
 
     int mask_position = seq_len - positions[batch_idx];
 
@@ -171,10 +171,15 @@ __global__ void stage_one(const half16 *Q, const half16 *K, const int *positions
     // but mask_positioncan't be less than seq_len - window_size
     mask_position = max(mask_position, seq_len - window_size);
 
-    if (end_s <= mask_position)
+    if (end_s < mask_position)
     {
 
         return;
+    }
+
+    if (start_s <= mask_position)
+    {
+        start_s = mask_position;
     }
 
     const half scalingConstant = __float2half(1.f / sqrtf(head_size));
@@ -263,11 +268,17 @@ __global__ void stage_two(
     // but s_start can't be less than seq_len - window_size
     s_start = max(s_start, seq_len - window_size);
 
+    int remainder = s_start % vector_size;
+
     s_start /= vector_size;
 
     for (int s = s_start; s < seq_len / vector_size; s++)
     {
-        acc += dot((QK[qk_offset + s]), (V[v_offset + (tid * seq_len / vector_size) + s]));
+        // acc += dot((QK[qk_offset + s]), (V[v_offset + (tid * seq_len / vector_size) + s]));
+        for (int i = remainder; i < 16; i++)
+        {
+            acc += __half2float(QK[qk_offset + s].vals[i]) * __half2float(V[v_offset + (tid * seq_len / vector_size) + s].vals[i]);
+        }
     }
 
     out[out_offset + tid] = __float2half(acc);
@@ -279,7 +290,7 @@ __global__ void stage_two(
                                                                                                                     \
         auto kernelFunc = stage_one<numHeads, numKVHeads, headSize, vecSize, windowSize, seqChunkSize>;             \
                                                                                                                     \
-        const dim3 blocksPerGrid = {batch_size, numHeads, seq_len / seqChunkSize};                                  \
+        const dim3 blocksPerGrid = {batch_size, numHeads, div_ru(seq_len, seqChunkSize)};                           \
         constexpr dim3 threadsPerBlock = {headSize / vecSize};                                                      \
         kernelFunc<<<blocksPerGrid, threadsPerBlock, 0, stream>>>(Q_ptr, K_ptr, P_ptr, O_ptr, seq_len, batch_size); \
     }
