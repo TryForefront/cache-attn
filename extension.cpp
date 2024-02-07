@@ -25,7 +25,7 @@ void wrapper_stage_one(void *q, void *k, void *p, void *o, const int head_size, 
 void cache_attn_function(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor p, torch::Tensor o, const int window_size)
 {
 
-    torch::Tensor qk = torch::full({q.size(0), q.size(1), q.size(2), k.size(2)}, -50000.0, q.options());
+    torch::Tensor qk = torch::full({q.size(0), q.size(1), q.size(2), k.size(2)}, -50000, q.options());
 
     int head_size = q.size(3);
     int batch_size = q.size(0);
@@ -47,7 +47,9 @@ void cache_attn_function(torch::Tensor q, torch::Tensor k, torch::Tensor v, torc
                       window_size,
                       stream);
 
-    wrapper_stage_two(torch::softmax(qk, -1).data_ptr(),
+    torch::Tensor qk_processed = torch::softmax(qk, -1);
+
+    wrapper_stage_two(qk_processed.data_ptr(),
                       v.data_ptr(),
                       p.data_ptr(),
                       o.data_ptr(),

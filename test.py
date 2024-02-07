@@ -48,13 +48,13 @@ if __name__ == "__main__":
             .repeat_interleave(bs, dim=0)
         )
 
-    batch_size = 4
+    batch_size = 16
     q = torch.randn(batch_size, 32, 1, 128, device="cuda", dtype=torch.half).div(10)
     k_kernel = torch.randn(
-        batch_size, 8, 8192, 128, device="cuda", dtype=torch.half
+        batch_size, 8, 256, 128, device="cuda", dtype=torch.half
     ).div(10)
     v_kernel = torch.randn(
-        batch_size, 8, 8192, 128, device="cuda", dtype=torch.half
+        batch_size, 8, 256, 128, device="cuda", dtype=torch.half
     ).div(10)
 
     # k = torch.randn(batch_size, 8, 64, 128, device="cuda", dtype=torch.half).div(10)
@@ -63,7 +63,7 @@ if __name__ == "__main__":
     k = k_kernel.clone()
     v = v_kernel.clone()
 
-    mask = create_mask(batch_size, 8192, 4096)[:, :, -1:, :]
+    mask = create_mask(batch_size, 256, 4096)[:, :, -1:, :]
 
     # k_cache = k.clone()
     # v_cache = v.clone()
@@ -80,16 +80,16 @@ if __name__ == "__main__":
     window_size = 4096
 
     positions = torch.tensor(
-        [289, 289, 289, 289],
+        [7 if i == 0 else 0 for i in range(batch_size)],
         device="cuda",
         dtype=torch.int,
-    )
+    ).unsqueeze(-1)
 
     # # mask = create_mask(batch_size, 512, window_size)[:, :, -1:, :]
 
     for i, position in enumerate(positions):
-        mask[i, :, :, -position:].fill_(True)
-        mask[i, :, :, :-position].fill_(False)
+        mask[i, :, :, -max(position, 1) :].fill_(True)
+        mask[i, :, :, : -max(position, 1)].fill_(False)
 
     import time
 
@@ -137,7 +137,7 @@ if __name__ == "__main__":
 
     # print(torch.allclose(o, out_ground_truth))
 
-    o = cached_attention_function(q, k_kernel, v_kernel, window_size, positions)
+    o = cached_attention_function(q, k, v, window_size, positions)
 
     # _k = torch.cat([k_cache_fp8, k_single], dim=2)[..., 1:, :]
     # _v = torch.cat([v_cache_fp8, v_single], dim=2)[..., 1:, :]
@@ -155,6 +155,6 @@ if __name__ == "__main__":
 
     out_ground_truth = baseline(q, k, v, mask)
 
-    compare_samples(o, out_ground_truth)
+    compare_samples(o[0], out_ground_truth[0])
     # compare_samples(k_test, _k)
     # compare_samples(v_test, _v)

@@ -45,7 +45,7 @@ CUDA_DEVICE_INLINE half16 operator*(const half16 &lhs, const half16 &rhs)
 #pragma unroll
     for (int i = 0; i < 16; i++)
     {
-        result.vals[i] = lhs.vals[i] * rhs.vals[i];
+        result.vals[i] = __half2float(lhs.vals[i]) * __half2float(rhs.vals[i]);
     }
     return result;
 }
@@ -139,7 +139,7 @@ CUDA_DEVICE_INLINE float16 mulScalarWithfloat8(float a, half16 b)
 }
 
 template <int num_heads, int num_kv_heads, int head_size, int vector_size, int window_size, int SEQ_CHUNK_SIZE>
-__global__ void stage_one(const half16 *Q, const half16 *K, const int *positions, half __restrict__ *out, int seq_len, int batch_size)
+__global__ void stage_one(const half16 *Q, const half16 *K, const int *positions, half *out, int seq_len, int batch_size)
 {
     const int batch_idx = blockIdx.x;
     const int head_idx = blockIdx.y;
@@ -230,7 +230,7 @@ __global__ void stage_two(
     const half16 *QK,
     const half16 *V,
     const int *positions,
-    half __restrict__ *out,
+    half *out,
     int seq_len,
     int batch_size)
 
@@ -268,31 +268,36 @@ __global__ void stage_two(
     // but s_start can't be less than seq_len - window_size
     s_start = max(s_start, seq_len - window_size);
 
-    int remainder = s_start % vector_size;
+    // int remainder = s_start % vector_size;
 
     s_start /= vector_size;
 
     for (int s = s_start; s < seq_len / vector_size; s++)
     {
-        // acc += dot((QK[qk_offset + s]), (V[v_offset + (tid * seq_len / vector_size) + s]));
-        for (int i = remainder; i < 16; i++)
-        {
-            acc += __half2float(QK[qk_offset + s].vals[i]) * __half2float(V[v_offset + (tid * seq_len / vector_size) + s].vals[i]);
-        }
+        acc += dot((QK[qk_offset + s]), (V[v_offset + (tid * seq_len / vector_size) + s]));
+        // for (int i = remainder; i < 16; i++)
+        // {
+        //     acc += __half2float(QK[qk_offset + s].vals[i]) * __half2float(V[v_offset + (tid * seq_len / vector_size) + s].vals[i]);
+        // }
     }
 
     out[out_offset + tid] = __float2half(acc);
 }
 
-#define LAUNCH_STAGE_ONE_IF_CONDITION(numHeads, numKVHeads, windowSize, headSize, vecSize, seqChunkSize)            \
-    else if (numHeads == num_heads && numKVHeads == num_kv_heads && windowSize == window_size && vecSize == 16)     \
-    {                                                                                                               \
-                                                                                                                    \
-        auto kernelFunc = stage_one<numHeads, numKVHeads, headSize, vecSize, windowSize, seqChunkSize>;             \
-                                                                                                                    \
-        const dim3 blocksPerGrid = {batch_size, numHeads, div_ru(seq_len, seqChunkSize)};                           \
-        constexpr dim3 threadsPerBlock = {headSize / vecSize};                                                      \
-        kernelFunc<<<blocksPerGrid, threadsPerBlock, 0, stream>>>(Q_ptr, K_ptr, P_ptr, O_ptr, seq_len, batch_size); \
+#define LAUNCH_STAGE_ONE_IF_CONDITION(numHeads, numKVHeads, windowSize, headSize, vecSize, seqChunkSize)               \
+    else if (numHeads == num_heads && numKVHeads == num_kv_heads && windowSize == window_size && vecSize == 16)        \
+    {                                                                                                                  \
+                                                                                                                       \
+        auto kernelFunc = stage_one<numHeads, numKVHeads, headSize, vecSize, windowSize, seqChunkSize>;                \
+                                                                                                                       \
+        cudaFuncSetAttribute(                                                                                          \
+            kernelFunc,                                                                                                \
+            cudaFuncAttributeMaxDynamicSharedMemorySize,                                                               \
+            smem);                                                                                                     \
+                                                                                                                       \
+        const dim3 blocksPerGrid = {batch_size, numHeads, div_ru(seq_len, seqChunkSize)};                              \
+        constexpr dim3 threadsPerBlock = {headSize / vecSize};                                                         \
+        kernelFunc<<<blocksPerGrid, threadsPerBlock, smem, stream>>>(Q_ptr, K_ptr, P_ptr, O_ptr, seq_len, batch_size); \
     }
 
 void wrapper_stage_one(void *q, void *k, void *p, void *o, const int head_size, const int batch_size, const int seq_len, const int num_kv_heads, const int num_heads, const int window_size, cudaStream_t stream)
@@ -303,6 +308,8 @@ void wrapper_stage_one(void *q, void *k, void *p, void *o, const int head_size, 
     const int *P_ptr = reinterpret_cast<const int *>(p);
     half *O_ptr = reinterpret_cast<half *>(o);
 
+    constexpr int smem = 95 * 1024;
+
     constexpr int seq_chunk_len = 16;
     if (false)
     {
@@ -312,15 +319,20 @@ void wrapper_stage_one(void *q, void *k, void *p, void *o, const int head_size, 
     LAUNCH_STAGE_ONE_IF_CONDITION(64, 8, 4096, 64, 16, 16)
 }
 
-#define LAUNCH_STAGE_TWO_IF_CONDITION(numHeads, numKVHeads, windowSize, headSize, vecSize)                           \
-    else if (numHeads == num_heads && numKVHeads == num_kv_heads && windowSize == window_size && vecSize == 16)      \
-    {                                                                                                                \
-                                                                                                                     \
-        auto kernelFunc = stage_two<headSize, vecSize, windowSize, numHeads, numKVHeads>;                            \
-                                                                                                                     \
-        const dim3 blocksPerGrid = {batch_size, numHeads};                                                           \
-        constexpr dim3 threadsPerBlock = {headSize};                                                                 \
-        kernelFunc<<<blocksPerGrid, threadsPerBlock, 0, stream>>>(QK_ptr, V_ptr, P_ptr, O_ptr, seq_len, batch_size); \
+#define LAUNCH_STAGE_TWO_IF_CONDITION(numHeads, numKVHeads, windowSize, headSize, vecSize)                              \
+    else if (numHeads == num_heads && numKVHeads == num_kv_heads && windowSize == window_size && vecSize == 16)         \
+    {                                                                                                                   \
+                                                                                                                        \
+        auto kernelFunc = stage_two<headSize, vecSize, windowSize, numHeads, numKVHeads>;                               \
+                                                                                                                        \
+        cudaFuncSetAttribute(                                                                                           \
+            kernelFunc,                                                                                                 \
+            cudaFuncAttributeMaxDynamicSharedMemorySize,                                                                \
+            smem);                                                                                                      \
+                                                                                                                        \
+        const dim3 blocksPerGrid = {batch_size, numHeads};                                                              \
+        constexpr dim3 threadsPerBlock = {headSize};                                                                    \
+        kernelFunc<<<blocksPerGrid, threadsPerBlock, smem, stream>>>(QK_ptr, V_ptr, P_ptr, O_ptr, seq_len, batch_size); \
     }
 
 void wrapper_stage_two(void *qk, void *v, void *p, void *o, const int head_size, const int batch_size, const int seq_len, const int num_kv_heads, const int num_heads, const int window_size, cudaStream_t stream)
@@ -330,6 +342,8 @@ void wrapper_stage_two(void *qk, void *v, void *p, void *o, const int head_size,
     const half16 *V_ptr = reinterpret_cast<const half16 *>(v);
     const int *P_ptr = reinterpret_cast<const int *>(p);
     half *O_ptr = reinterpret_cast<half *>(o);
+
+    constexpr int smem = 0;
 
     constexpr int seq_chunk_len = 16;
     if (false)
