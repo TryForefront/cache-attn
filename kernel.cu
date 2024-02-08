@@ -153,10 +153,10 @@ __global__ void stage_one(const half16 *Q, const half16 *K, const int *positions
     const int head_stride = seq_len * head_size;
     const int seq_stride = seq_len;
     const int q_batch_stride = head_size * num_heads;
-    const int q_offset = (batch_idx * q_batch_stride + head_idx * head_size) / vector_size;
-    const int kv_offset = (batch_idx * batch_stride + kv_head_idx * head_stride) / vector_size;
+    const unsigned long q_offset = (batch_idx * q_batch_stride + head_idx * head_size) / vector_size;
+    const unsigned long kv_offset = (batch_idx * batch_stride + kv_head_idx * head_stride) / vector_size;
 
-    const int out_offset = (batch_idx * num_heads * seq_len + head_idx * seq_len);
+    const unsigned long out_offset = (batch_idx * num_heads * seq_len + head_idx * seq_len);
 
     __shared__ half16 shared_Q[head_size / vector_size];
 
@@ -253,10 +253,10 @@ __global__ void stage_two(
 
     const int v_head_stride = seq_len * head_size;
 
-    const int qk_offset = (batch_idx * qk_batch_stride + head_idx * qk_head_stride) / vector_size;
-    const int v_offset = (batch_idx * v_batch_stride + kv_head_idx * v_head_stride) / vector_size;
+    const unsigned long qk_offset = (batch_idx * qk_batch_stride + head_idx * qk_head_stride) / vector_size;
+    const unsigned long v_offset = (batch_idx * v_batch_stride + kv_head_idx * v_head_stride) / vector_size;
 
-    const int out_offset = (batch_idx * num_heads * head_size + head_idx * head_size);
+    const unsigned long out_offset = (batch_idx * num_heads * head_size + head_idx * head_size);
 
     float acc = 0.f;
 
@@ -308,7 +308,7 @@ void wrapper_stage_one(void *q, void *k, void *p, void *o, const int head_size, 
     const int *P_ptr = reinterpret_cast<const int *>(p);
     half *O_ptr = reinterpret_cast<half *>(o);
 
-    constexpr int smem = 95 * 1024;
+    constexpr int smem = 0;
 
     constexpr int seq_chunk_len = 16;
     if (false)
@@ -352,4 +352,44 @@ void wrapper_stage_two(void *qk, void *v, void *p, void *o, const int head_size,
     LAUNCH_STAGE_TWO_IF_CONDITION(32, 8, 4096, 128, 16)
     LAUNCH_STAGE_TWO_IF_CONDITION(32, 32, 4096, 80, 16)
     LAUNCH_STAGE_TWO_IF_CONDITION(64, 8, 4096, 64, 16)
+}
+
+template <int num_kv_heads, int head_size>
+__global__ void update_kv_cache(const half *K, // [batch_size, num_kv_heads, 1, head_size]
+                                const half *V, // [batch_size, num_kv_heads, 1, head_size]
+                                half *cache,   // [num_blocks, 2, batch_size, num_kv_heads, seq_len, head_size]
+                                const int seq_len,
+                                const int block_idx,
+                                const int batch_size)
+
+{
+    const int batch_idx = blockIdx.x;
+    const int head_idx = blockIdx.y;
+
+    unsigned long kv_offset = batch_idx * num_kv_heads * head_size + head_idx * head_size;
+
+    unsigned long cache_k_offset = block_idx * 2 * batch_size * num_kv_heads * seq_len * head_size + 0 * batch_size * num_kv_heads * seq_len * head_size + batch_idx * num_kv_heads * seq_len * head_size + head_idx * seq_len * head_size;
+    unsigned long cache_v_offset = block_idx * 2 * batch_size * num_kv_heads * seq_len * head_size + 1 * batch_size * num_kv_heads * seq_len * head_size + batch_idx * num_kv_heads * seq_len * head_size + head_idx * seq_len * head_size;
+
+    const int hid = threadIdx.x;
+
+#pragma unroll
+    for (int s = 1; s < seq_len; s++)
+    {
+
+        cache[cache_k_offset + (s - 1) * head_size + hid] = cache[cache_k_offset + s * head_size + hid];
+        cache[cache_v_offset + (s - 1) * head_size + hid] = cache[cache_v_offset + s * head_size + hid];
+    }
+
+    cache[cache_k_offset + (seq_len - 1) * head_size + hid] = K[kv_offset + hid];
+    cache[cache_v_offset + (seq_len - 1) * head_size + hid] = V[kv_offset + hid];
+}
+
+void wrapper_update_kv_cache(void *k, void *v, void *cache, const int head_size, const int batch_size, const int num_kv_heads, const int block_idx, const int seq_len, cudaStream_t stream)
+{
+    const half *K_ptr = reinterpret_cast<const half *>(k);
+    const half *V_ptr = reinterpret_cast<const half *>(v);
+    half *cache_ptr = reinterpret_cast<half *>(cache);
+
+    update_kv_cache<8, 128><<<dim3(batch_size, 8), head_size, 0, stream>>>(K_ptr, V_ptr, cache_ptr, seq_len, block_idx, batch_size);
 }

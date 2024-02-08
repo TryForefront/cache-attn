@@ -21,6 +21,7 @@
 
 void wrapper_stage_two(void *qk, void *v, void *p, void *o, const int head_size, const int batch_size, const int seq_len, const int num_kv_heads, const int num_heads, const int window_size, cudaStream_t stream);
 void wrapper_stage_one(void *q, void *k, void *p, void *o, const int head_size, const int batch_size, const int seq_len, const int num_kv_heads, const int num_heads, const int window_size, cudaStream_t stream);
+void wrapper_update_kv_cache(void *k, void *v, void *cache, const int head_size, const int batch_size, const int num_kv_heads, const int block_idx, const int seq_len, cudaStream_t stream);
 
 void cache_attn_function(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor p, torch::Tensor o, const int window_size)
 {
@@ -62,7 +63,28 @@ void cache_attn_function(torch::Tensor q, torch::Tensor k, torch::Tensor v, torc
                       stream);
 }
 
+void update_kv_cache_function(torch::Tensor k, torch::Tensor v, torch::Tensor cache, const int block_idx)
+{
+    int head_size = k.size(3);
+    int batch_size = k.size(0);
+    int num_kv_heads = k.size(1);
+    int seq_len = cache.size(4);
+
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream(k.get_device());
+
+    wrapper_update_kv_cache(k.data_ptr(),
+                            v.data_ptr(),
+                            cache.data_ptr(),
+                            head_size,
+                            batch_size,
+                            num_kv_heads,
+                            block_idx,
+                            seq_len,
+                            stream);
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
     m.def("cache_attn_function", &cache_attn_function, "FP16xFP4 Matrix Multiplication Kernel");
+    m.def("update_kv_cache_function", &update_kv_cache_function, "FP16xFP4 Matrix Multiplication Kernel");
 }
