@@ -115,7 +115,7 @@ __global__ void cache_attn(const half *q,  // [numQheads, batchSize, headSize]
 
         float thisQk = __half2float(sharedQ[threadIdx.x]) * __half2float(kItem);
 
-        float qk = block_sum<128 / 32>(&blockReduction[NUM_WARPS], thisQk);
+        float qk = block_sum<NUM_WARPS>(&blockReduction[NUM_WARPS], thisQk);
 
         cache[kCacheOffset + (s + batchIndex) * headSize + threadIdx.x] = kItem;
 
