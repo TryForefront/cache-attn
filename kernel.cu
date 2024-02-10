@@ -5,18 +5,17 @@
 #include <cmath>
 #include <tuple>
 
-#define likely(x) __builtin_expect(!!(x), 1)
-#define unlikely(x) __builtin_expect(!!(x), 0)
-#define load(x) __ldcg(x)
-#define store(x, value) __stcs(x, value)
 #define div_ru(a, b) (a + b - 1) / b
-#define div_rd(a, b) a / b
 
-#define VLLM_SHFL_XOR_SYNC(var, lane_mask) __shfl_xor_sync(uint32_t(-1), var, lane_mask)
-#define VLLM_SHFL_SYNC(var, src_lane) __shfl_sync(uint32_t(-1), var, src_lane)
 #define WARP_SIZE 32
 
 #define CUDA_DEVICE_INLINE __device__ __forceinline__
+
+// the vllm stuff is copied from the vllm repo
+// (https://github.com/vllm-project/vllm/blob/3711811b1d2956e83e626c72f0e1607f2dfbc8fb/csrc/cuda_compat.h)
+//  and (https://github.com/vllm-project/vllm/blob/3711811b1d2956e83e626c72f0e1607f2dfbc8fb/csrc/attention/attention_kernels.cu#L45)
+#define VLLM_SHFL_XOR_SYNC(var, lane_mask) __shfl_xor_sync(uint32_t(-1), var, lane_mask)
+#define VLLM_SHFL_SYNC(var, src_lane) __shfl_sync(uint32_t(-1), var, src_lane)
 
 template <int NUM_WARPS>
 CUDA_DEVICE_INLINE float block_sum(float *red_smem, float sum)
@@ -59,14 +58,10 @@ CUDA_DEVICE_INLINE float block_sum(float *red_smem, float sum)
 }
 
 template <int headSize, int numQheads, int numKVheads, int numBlocks>
-__global__ void cache_attn(const half *q, // [numQheads, batchSize, headSize]
-                           const half *k, // [numKVheads, batchSize, headSize]
-                           const half *v, // [numKVheads, batchSize, headSize]
-                           //    half *kCache,   // [numKVheads, totalSeq, headSize]
-                           //    half *vCache,   // [numKVheads, totalSeq, headSize]
+__global__ void cache_attn(const half *q,  // [numQheads, batchSize, headSize]
+                           const half *k,  // [numKVheads, batchSize, headSize]
+                           const half *v,  // [numKVheads, batchSize, headSize]
                            half *cache,    // [numBlocks, 2, numKVheads, totalSeq, headSize]
-                                           //    half *kOut,         // [numKVheads, totalSeq + batchSize, headSize]
-                                           //    half *vOut,         // [numKVheads, totalSeq + batchSize, headSize]
                            const int *pos, // [batchSize]
                            const int *pc,  // [batchSize]
                            half *out,      // [numQheads, batchSize, headSize]
@@ -116,21 +111,13 @@ __global__ void cache_attn(const half *q, // [numQheads, batchSize, headSize]
     for (int s = cumulSeqLen + thisSeqLen; s > cumulSeqLen; s--)
     {
 
-        // float qk = 0.0f;
-        // for (int h = 0; h < headSize; h++)
-        // {
-
         half kItem = (cache[kCacheOffset + s * headSize + threadIdx.x]);
-
-        // qk += __half2float(sharedQ[h]) * __half2float(kItem);
 
         float thisQk = __half2float(sharedQ[threadIdx.x]) * __half2float(kItem);
 
         float qk = block_sum<128 / 32>(&blockReduction[NUM_WARPS], thisQk);
 
-        // kOut[kvOutOffset + s * headSize + h] = kItem;
         cache[kCacheOffset + (s + batchIndex) * headSize + threadIdx.x] = kItem;
-        // }
 
         float mi_new = max(mi, qk);
 
@@ -176,31 +163,44 @@ __global__ void cache_attn(const half *q, // [numQheads, batchSize, headSize]
 
     li = li * alpha + p;
 
-    // vOut[kvOutOffset + (cumulSeqLen + thisSeqLen + 1) * headSize + threadIdx.x] = vitem;
     cache[vCacheOffset + (cumulSeqLen + thisSeqLen + batchIndex) * headSize + threadIdx.x] = vitem;
 
     out[outOffset + threadIdx.x] = __float2half(acc / li);
 }
 
-void wrapper(void *q, void *k, void *v, void *c, void *p, void *pc, void *o, const int batchSize, const int totalSeq, const int layer_index, cudaStream_t stream)
+#define LAUNCH_KERNEL_IF_CONDITION(headDim, numHeads, numKVHeads, numBlocks)                                                                                                 \
+    else if (num_heads == numHeads && num_kv_heads == numKVHeads && head_dim == headDim && num_blocks == numBlocks)                                                          \
+    {                                                                                                                                                                        \
+        auto kernelFunc = cache_attn<headDim, numHeads, numKVHeads, numBlocks>;                                                                                              \
+                                                                                                                                                                             \
+        constexpr unsigned int smem = 0;                                                                                                                                     \
+                                                                                                                                                                             \
+        cudaFuncSetAttribute(                                                                                                                                                \
+            kernelFunc,                                                                                                                                                      \
+            cudaFuncAttributeMaxDynamicSharedMemorySize,                                                                                                                     \
+            smem);                                                                                                                                                           \
+                                                                                                                                                                             \
+        dim3 blocks_per_grid(batchSize, numHeads);                                                                                                                           \
+        constexpr dim3 threads_per_block(headDim);                                                                                                                           \
+        kernelFunc<<<blocks_per_grid, threads_per_block, smem, stream>>>(Q_ptr, K_ptr, V_ptr, Cache_ptr, P_ptr, PCumulative_ptr, Out_ptr, batchSize, totalSeq, layer_index); \
+        return;                                                                                                                                                              \
+    }
+
+void wrapper(void *q, void *k, void *v, void *c, void *p, void *pc, void *o, const int batchSize, const int totalSeq, const int layer_index, const int num_heads, const int num_kv_heads, const int head_dim, const int num_blocks, cudaStream_t stream)
 {
 
     const half *Q_ptr = reinterpret_cast<const half *>(q);
     const half *K_ptr = reinterpret_cast<const half *>(k);
     const half *V_ptr = reinterpret_cast<const half *>(v);
-    // half *KCache_ptr = reinterpret_cast<half *>(kc);
-    // half *VCache_ptr = reinterpret_cast<half *>(vc);
     half *Cache_ptr = reinterpret_cast<half *>(c);
-    // half *KOut_ptr = reinterpret_cast<half *>(ko);
-    // half *VOut_ptr = reinterpret_cast<half *>(vo);
     const int *P_ptr = reinterpret_cast<const int *>(p);
     const int *PCumulative_ptr = reinterpret_cast<const int *>(pc);
-    // const int *G_ptr = reinterpret_cast<const int *>(g);
-    // const int *L_ptr = reinterpret_cast<const int *>(l);
     half *Out_ptr = reinterpret_cast<half *>(o);
 
-    const dim3 grid = {batchSize, 32};
-    constexpr dim3 block = {128};
-
-    cache_attn<128, 32, 8, 32><<<grid, block, 0, stream>>>(Q_ptr, K_ptr, V_ptr, Cache_ptr, P_ptr, PCumulative_ptr, Out_ptr, batchSize, totalSeq, layer_index);
+    if (false)
+    {
+    }
+    LAUNCH_KERNEL_IF_CONDITION(128, 32, 8, 32)
+    LAUNCH_KERNEL_IF_CONDITION(80, 32, 32, 32)
+    LAUNCH_KERNEL_IF_CONDITION(128, 64, 8, 80)
 }
