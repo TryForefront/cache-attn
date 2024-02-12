@@ -11,6 +11,20 @@
 
 #define CUDA_DEVICE_INLINE __device__ __forceinline__
 
+CUDA_DEVICE_INLINE float warpReduceSumAllThreads(float val)
+{
+    for (int offset = warpSize / 2; offset > 0; offset /= 2)
+    {
+        val += __shfl_down_sync(0xffffffff, val, offset);
+    }
+    return __shfl_sync(0xffffffff, val, 0);
+}
+
+struct __align__(8) half4
+{
+    half vals[4];
+};
+
 // the vllm stuff is copied from the vllm repo
 // (https://github.com/vllm-project/vllm/blob/3711811b1d2956e83e626c72f0e1607f2dfbc8fb/csrc/cuda_compat.h)
 //  and (https://github.com/vllm-project/vllm/blob/3711811b1d2956e83e626c72f0e1607f2dfbc8fb/csrc/attention/attention_kernels.cu#L45)
@@ -137,17 +151,11 @@ __global__ void cache_attn(const half *q,  // [numQheads, batchSize, headSize]
         cache[vCacheOffset + (s + batchIndex) * headSize + threadIdx.x] = vitem;
     }
 
-    float qk = 0.f;
+    half kItem = k[kvOffset + threadIdx.x];
 
-    for (int h = 0; h < headSize; h++)
-    {
+    float qk = block_sum<NUM_WARPS>(&blockReduction[NUM_WARPS], __half2float(sharedQ[threadIdx.x]) * __half2float(kItem));
 
-        half kitem = k[kvOffset + h];
-
-        qk += __half2float(sharedQ[h]) * __half2float(kitem);
-
-        cache[kCacheOffset + (cumulSeqLen + thisSeqLen + batchIndex) * headSize + h] = kitem;
-    }
+    cache[kCacheOffset + (cumulSeqLen + thisSeqLen + batchIndex) * headSize + threadIdx.x] = kItem;
 
     float mi_new = max(mi, qk);
 
