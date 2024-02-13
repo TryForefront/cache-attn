@@ -159,7 +159,7 @@ __global__ void cache_attn(const half *q,  // [numQheads, batchSize, headSize]
 
     float mi_new = max(mi, qk);
 
-    float alpha = exp2f(mi_new - mi);
+    float alpha = exp2f(mi - mi_new);
 
     float p = exp2f(qk - mi_new);
 
