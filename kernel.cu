@@ -122,7 +122,31 @@ __global__ void cache_attn(const half *q,  // [numQheads, batchSize, headSize]
     float mi = -50000.f;
     float li = 0.f;
 
-    for (int s = cumulSeqLen + thisSeqLen; s > cumulSeqLen; s--)
+    half kitem = k[kvOffset + threadIdx.x];
+
+    float qk = __half2float(sharedQ[threadIdx.x]) * __half2float(kitem);
+
+    qk = block_sum<NUM_WARPS>(&blockReduction[NUM_WARPS], qk);
+
+    cache[kCacheOffset + (cumulSeqLen + thisSeqLen + batchIndex) * headSize + threadIdx.x] = kitem;
+
+    float mi_new = max(mi, qk);
+
+    float alpha = exp2f(mi - mi_new);
+
+    float p = exp2f(qk - mi_new);
+
+    half vitem = v[kvOffset + threadIdx.x];
+
+    acc *= alpha;
+
+    acc += p * __half2float(vitem);
+
+    li = li * alpha + p;
+
+    cache[vCacheOffset + (cumulSeqLen + thisSeqLen + batchIndex) * headSize + threadIdx.x] = vitem;
+
+    for (int s = cumulSeqLen + thisSeqLen; s >= cumulSeqLen; s--)
     {
 
         half kItem = (cache[kCacheOffset + s * headSize + threadIdx.x]);
@@ -151,27 +175,17 @@ __global__ void cache_attn(const half *q,  // [numQheads, batchSize, headSize]
         cache[vCacheOffset + (s + batchIndex) * headSize + threadIdx.x] = vitem;
     }
 
-    half kItem = k[kvOffset + threadIdx.x];
+    // float qk = 0.f;
 
-    float qk = block_sum<NUM_WARPS>(&blockReduction[NUM_WARPS], __half2float(sharedQ[threadIdx.x]) * __half2float(kItem));
+    // for (int h = 0; h < headSize; h++)
+    // {
 
-    cache[kCacheOffset + (cumulSeqLen + thisSeqLen + batchIndex) * headSize + threadIdx.x] = kItem;
+    //     half kitem = k[kvOffset + h];
 
-    float mi_new = max(mi, qk);
+    //     qk += __half2float(sharedQ[h]) * __half2float(kitem);
 
-    float alpha = exp2f(mi - mi_new);
-
-    float p = exp2f(qk - mi_new);
-
-    half vitem = v[kvOffset + threadIdx.x];
-
-    acc *= alpha;
-
-    acc += p * __half2float(vitem);
-
-    li = li * alpha + p;
-
-    cache[vCacheOffset + (cumulSeqLen + thisSeqLen + batchIndex) * headSize + threadIdx.x] = vitem;
+    //     cache[kCacheOffset + (cumulSeqLen + thisSeqLen + batchIndex) * headSize + h] = kitem;
+    // }
 
     out[outOffset + threadIdx.x] = __float2half(acc / li);
 }

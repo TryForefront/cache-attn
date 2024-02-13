@@ -101,10 +101,10 @@ if __name__ == "__main__":
     batch_size = 1
     q = torch.randn(batch_size, 32, 1, 128, device="cuda", dtype=torch.half).div(10)
     k_kernel = torch.randn(
-        32, 1, batch_size, 8, 513, 128, device="cuda", dtype=torch.half
+        32, 1, batch_size, 8, 33, 128, device="cuda", dtype=torch.half
     ).div(10)
     v_kernel = torch.randn(
-        32, 1, batch_size, 8, 513, 128, device="cuda", dtype=torch.half
+        32, 1, batch_size, 8, 33, 128, device="cuda", dtype=torch.half
     ).div(10)
 
     k_out = k_kernel.clone()
@@ -116,7 +116,7 @@ if __name__ == "__main__":
     k = k_kernel.clone()
     v = v_kernel.clone()
 
-    mask = create_mask(batch_size, 513, 4096)[:, :, -1:, :]
+    mask = create_mask(batch_size, 33, 4096)[:, :, -1:, :]
 
     # prev_k, k = k[:, :, :-1], k[:, :, -1:]
     # prev_v, v = v[:, :, :-1], v[:, :, -1:]
@@ -141,7 +141,7 @@ if __name__ == "__main__":
     window_size = 4096
 
     positions = torch.tensor(
-        [513 for i in range(batch_size)],
+        [32 for i in range(batch_size)],
         device="cuda",
         dtype=torch.int,
     )
@@ -180,62 +180,62 @@ if __name__ == "__main__":
     # print(v_cache.shape)
     # print(k_cache.shape)
 
-    start = time.time()
+    # start = time.time()
 
-    for _ in range(N_RUNS):
-        # _k, _v = (
-        #     k[:, :, 1:, :].repeat_interleave(4, dim=1),
-        #     v[:, :, 1:, :].repeat_interleave(4, dim=1),
-        # )
-        # _k_single = k_single.repeat_interleave(4, dim=1)
-        # _v_single = v_single.repeat_interleave(4, dim=1)
-        # _ = torch.cat([_k_single, _k], dim=2)
-        # _ = torch.cat([_v_single, _v], dim=2)
-        # out = F.scaled_dot_product_attention(
-        #     q,
-        #     k.repeat_interleave(4, dim=1),
-        #     v.repeat_interleave(4, dim=1),
-        #     attn_mask=None,
-        # )
-        baseline(q, k_single, v_single, cache[0, 0], cache[0, 1], k_out, v_out, mask)
+    # for _ in range(N_RUNS):
+    #     # _k, _v = (
+    #     #     k[:, :, 1:, :].repeat_interleave(4, dim=1),
+    #     #     v[:, :, 1:, :].repeat_interleave(4, dim=1),
+    #     # )
+    #     # _k_single = k_single.repeat_interleave(4, dim=1)
+    #     # _v_single = v_single.repeat_interleave(4, dim=1)
+    #     # _ = torch.cat([_k_single, _k], dim=2)
+    #     # _ = torch.cat([_v_single, _v], dim=2)
+    #     # out = F.scaled_dot_product_attention(
+    #     #     q,
+    #     #     k.repeat_interleave(4, dim=1),
+    #     #     v.repeat_interleave(4, dim=1),
+    #     #     attn_mask=None,
+    #     # )
+    #     baseline(q, k_single, v_single, cache[0, 0], cache[0, 1], k_out, v_out, mask)
 
-    torch.cuda.synchronize()
-    end = time.time()
+    # torch.cuda.synchronize()
+    # end = time.time()
 
-    print(f"Torch Time taken: {(end - start):.4f}")
+    # print(f"Torch Time taken: {(end - start):.4f}")
 
-    # cache = torch.cat([k_cache, v_cache], dim=0)
+    # # cache = torch.cat([k_cache, v_cache], dim=0)
 
-    for _ in range(N_RUNS):
-        _ = cached_attention_function(
-            q,
-            k_single,
-            v_single,
-            kernel_cache,
-            k_out,
-            v_out,
-            positions,
-            cumulativePositions,
-            0,
-        )
+    # for _ in range(N_RUNS):
+    #     _ = cached_attention_function(
+    #         q,
+    #         k_single,
+    #         v_single,
+    #         kernel_cache,
+    #         k_out,
+    #         v_out,
+    #         positions,
+    #         cumulativePositions,
+    #         0,
+    #     )
 
-    start = time.time()
-    for _ in range(N_RUNS):
-        _ = cached_attention_function(
-            q,
-            k_single,
-            v_single,
-            kernel_cache,
-            k_out,
-            v_out,
-            positions,
-            cumulativePositions,
-            0,
-        )
-    torch.cuda.synchronize()
-    end = time.time()
+    # start = time.time()
+    # for _ in range(N_RUNS):
+    #     _ = cached_attention_function(
+    #         q,
+    #         k_single,
+    #         v_single,
+    #         kernel_cache,
+    #         k_out,
+    #         v_out,
+    #         positions,
+    #         cumulativePositions,
+    #         0,
+    #     )
+    # torch.cuda.synchronize()
+    # end = time.time()
 
-    print(f"Cache Attn Time taken: {(end - start):.4f}")
+    # print(f"Cache Attn Time taken: {(end - start):.4f}")
 
     # out_ground_truth = baseline(q, k, v)
 
@@ -282,5 +282,5 @@ if __name__ == "__main__":
     )
 
     compare_samples(o[0], out_ground_truth[0])
-    compare_samples(kernel_cache[0, 0], _k)
-    compare_samples(kernel_cache[0, 1], _v)
+    # compare_samples(kernel_cache[0, 0], _k)
+    # compare_samples(kernel_cache[0, 1], _v)
