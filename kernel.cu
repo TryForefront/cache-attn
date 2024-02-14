@@ -72,13 +72,13 @@ CUDA_DEVICE_INLINE float block_sum(float *red_smem, float sum)
 }
 
 template <int headSize, int numQheads, int numKVheads, int numBlocks>
-__global__ void cache_attn(const half *q,  // [numQheads, batchSize, headSize]
-                           const half *k,  // [numKVheads, batchSize, headSize]
-                           const half *v,  // [numKVheads, batchSize, headSize]
-                           half *cache,    // [numBlocks, 2, numKVheads, totalSeq, headSize]
+__global__ void cache_attn(const half *q,  // [batchSize, numQheads, 1, headSize]
+                           const half *k,  // [batchSize, numKVheads, 1, headSize]
+                           const half *v,  // [batchSize, numKVheads, 1, headSize]
+                           half *cache,    // [numBlocks, 2, batchSize, numKVheads, totalSeq, headSize]
                            const int *pos, // [batchSize]
                            const int *pc,  // [batchSize]
-                           half *out,      // [numQheads, batchSize, headSize]
+                           half *out,      // [batchSize, numQheads, 1, headSize]
                            int batchSize,
                            int totalSeq,
                            int layer_index)
@@ -89,18 +89,26 @@ __global__ void cache_attn(const half *q,  // [numQheads, batchSize, headSize]
 
     const int kvHeadIndex = headIndex / (numQheads / numKVheads);
 
-    const int qOffset = headIndex * batchSize * headSize + batchIndex * headSize;
-    const int kvOffset = kvHeadIndex * batchSize * headSize + batchIndex * headSize;
+    const int qOffset = batchIndex * numQheads * headSize + headIndex * headSize;
+    const int kvOffset = batchIndex * numKVheads * headSize + kvHeadIndex * headSize;
     const int outOffset = qOffset;
 
     const int thisSeqLen = pos[batchIndex];
 
     const int cumulSeqLen = pc[batchIndex];
 
-    const int kCacheOffset = layer_index * 2 * numKVheads * totalSeq * headSize + 0 * numKVheads * totalSeq * headSize + kvHeadIndex * totalSeq * headSize;
-    const int vCacheOffset = layer_index * 2 * numKVheads * totalSeq * headSize + 1 * numKVheads * totalSeq * headSize + kvHeadIndex * totalSeq * headSize;
+    // const int kCacheOffset = layer_index * 2 * numKVheads * totalSeq * headSize + 0 * numKVheads * totalSeq * headSize + kvHeadIndex * totalSeq * headSize;
+    // const int vCacheOffset = layer_index * 2 * numKVheads * totalSeq * headSize + 1 * numKVheads * totalSeq * headSize + kvHeadIndex * totalSeq * headSize;
 
-    const int kvOutOffset = kvHeadIndex * (totalSeq + batchSize) * headSize;
+    const int kCacheOffset = /* block stride */ layer_index * 2 * batchSize * numKVheads * totalSeq * headSize +
+                             /* kv stride    */ 0 * batchSize * numKVheads * totalSeq * headSize +
+                             /* batch stride */ batchIndex * numKVheads * totalSeq * headSize +
+                             /* head stride  */ kvHeadIndex * totalSeq * headSize;
+
+    const int vCacheOffset = /* block stride */ layer_index * 2 * batchSize * numKVheads * totalSeq * headSize +
+                             /* kv stride    */ 1 * batchSize * numKVheads * totalSeq * headSize +
+                             /* batch stride */ batchIndex * numKVheads * totalSeq * headSize +
+                             /* head stride  */ kvHeadIndex * totalSeq * headSize;
 
     __shared__ half sharedQ[headSize];
 
@@ -122,31 +130,7 @@ __global__ void cache_attn(const half *q,  // [numQheads, batchSize, headSize]
     float mi = -50000.f;
     float li = 0.f;
 
-    half kitem = k[kvOffset + threadIdx.x];
-
-    float qk = __half2float(sharedQ[threadIdx.x]) * __half2float(kitem);
-
-    qk = block_sum<NUM_WARPS>(&blockReduction[NUM_WARPS], qk);
-
-    cache[kCacheOffset + (cumulSeqLen + thisSeqLen + batchIndex) * headSize + threadIdx.x] = kitem;
-
-    float mi_new = max(mi, qk);
-
-    float alpha = exp2f(mi - mi_new);
-
-    float p = exp2f(qk - mi_new);
-
-    half vitem = v[kvOffset + threadIdx.x];
-
-    acc *= alpha;
-
-    acc += p * __half2float(vitem);
-
-    li = li * alpha + p;
-
-    cache[vCacheOffset + (cumulSeqLen + thisSeqLen + batchIndex) * headSize + threadIdx.x] = vitem;
-
-    for (int s = cumulSeqLen + thisSeqLen; s >= cumulSeqLen; s--)
+    for (int s = 0; s < thisSeqLen; s++)
     {
 
         half kItem = (cache[kCacheOffset + s * headSize + threadIdx.x]);
@@ -155,7 +139,7 @@ __global__ void cache_attn(const half *q,  // [numQheads, batchSize, headSize]
 
         float qk = block_sum<NUM_WARPS>(&blockReduction[NUM_WARPS], thisQk);
 
-        cache[kCacheOffset + (s + batchIndex) * headSize + threadIdx.x] = kItem;
+        // cache[kCacheOffset + s * headSize + threadIdx.x] = kItem;
 
         float mi_new = max(mi, qk);
 
@@ -172,20 +156,31 @@ __global__ void cache_attn(const half *q,  // [numQheads, batchSize, headSize]
         li = li * alpha + p;
         mi = mi_new;
 
-        cache[vCacheOffset + (s + batchIndex) * headSize + threadIdx.x] = vitem;
+        // cache[vCacheOffset + (s + batchIndex) * headSize + threadIdx.x] = vitem;
     }
 
-    // float qk = 0.f;
+    half finalKItem = k[kvOffset + threadIdx.x];
 
-    // for (int h = 0; h < headSize; h++)
-    // {
+    float qk = __half2float(sharedQ[threadIdx.x]) * __half2float(finalKItem);
 
-    //     half kitem = k[kvOffset + h];
+    qk = block_sum<NUM_WARPS>(&blockReduction[NUM_WARPS], qk);
 
-    //     qk += __half2float(sharedQ[h]) * __half2float(kitem);
+    float mi_new = max(mi, qk);
 
-    //     cache[kCacheOffset + (cumulSeqLen + thisSeqLen + batchIndex) * headSize + h] = kitem;
-    // }
+    float alpha = exp2f(mi - mi_new);
+
+    float p = exp2f(qk - mi_new);
+
+    half finalVItem = v[kvOffset + threadIdx.x];
+
+    acc *= alpha;
+
+    acc += p * __half2float(finalVItem);
+
+    li = li * alpha + p;
+
+    cache[kCacheOffset + (thisSeqLen + 0) * headSize + threadIdx.x] = finalKItem;
+    cache[vCacheOffset + (thisSeqLen + 0) * headSize + threadIdx.x] = finalVItem;
 
     out[outOffset + threadIdx.x] = __float2half(acc / li);
 }
