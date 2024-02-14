@@ -16,11 +16,11 @@ def cached_attention_function(
     cumulativePositions,
     layer_index,
 ):
-    q = q.permute(2, 1, 0, 3).contiguous()
+    # q = q.permute(2, 1, 0, 3).contiguous()
     o = torch.zeros_like(q)
 
-    _k_single = k_single.permute(2, 1, 0, 3).contiguous()
-    _v_single = v_single.permute(2, 1, 0, 3).contiguous()
+    # _k_single = k_single.permute(2, 1, 0, 3).contiguous()
+    # _v_single = v_single.permute(2, 1, 0, 3).contiguous()
 
     # _k_cache = k_cache.permute(1, 0, 2, 3).reshape(8, -1, 128).contiguous()
     # _v_cache = v_cache.permute(1, 0, 2, 3).reshape(8, -1, 128).contiguous()
@@ -30,8 +30,8 @@ def cached_attention_function(
 
     cache_attn.cache_attn_function(
         q.clone(),
-        _k_single.clone(),
-        _v_single.clone(),
+        k_single.clone(),
+        v_single.clone(),
         cache,
         # _k_out.clone(),
         # _v_out.clone(),
@@ -42,7 +42,7 @@ def cached_attention_function(
     )
 
     return (
-        o.permute(2, 1, 0, 3).contiguous(),
+        o,
         None,
         None,
         # _k_out.reshape(8, -1, 513, 128).permute(1, 0, 2, 3).contiguous(),
@@ -98,13 +98,13 @@ if __name__ == "__main__":
             .repeat_interleave(bs, dim=0)
         )
 
-    batch_size = 1
+    batch_size = 2
     q = torch.randn(batch_size, 32, 1, 128, device="cuda", dtype=torch.half).div(10)
     k_kernel = torch.randn(
-        32, 1, batch_size, 8, 33, 128, device="cuda", dtype=torch.half
+        32, 1, batch_size, 8, 513, 128, device="cuda", dtype=torch.half
     ).div(10)
     v_kernel = torch.randn(
-        32, 1, batch_size, 8, 33, 128, device="cuda", dtype=torch.half
+        32, 1, batch_size, 8, 513, 128, device="cuda", dtype=torch.half
     ).div(10)
 
     k_out = k_kernel.clone()
@@ -116,7 +116,7 @@ if __name__ == "__main__":
     k = k_kernel.clone()
     v = v_kernel.clone()
 
-    mask = create_mask(batch_size, 33, 4096)[:, :, -1:, :]
+    mask = create_mask(batch_size, 513, 4096)[:, :, -1:, :]
 
     # prev_k, k = k[:, :, :-1], k[:, :, -1:]
     # prev_v, v = v[:, :, :-1], v[:, :, -1:]
@@ -130,8 +130,6 @@ if __name__ == "__main__":
     k_cache = k[:, :, :, :, :-1].contiguous()
     v_cache = v[:, :, :, :, :-1].contiguous()
 
-    print(k_single.shape, k_cache.shape)
-
     # k_cache_fp8 = k_cache.clone()  # f16_to_f8(k_cache)
     # v_cache_fp8 = v_cache.clone()  # f16_to_f8(v_cache)
 
@@ -141,7 +139,7 @@ if __name__ == "__main__":
     window_size = 4096
 
     positions = torch.tensor(
-        [32 for i in range(batch_size)],
+        [256, 4],
         device="cuda",
         dtype=torch.int,
     )
@@ -281,6 +279,6 @@ if __name__ == "__main__":
         mask,
     )
 
-    compare_samples(o[0], out_ground_truth[0])
+    compare_samples(o[0][0], out_ground_truth[0])
     # compare_samples(kernel_cache[0, 0], _k)
     # compare_samples(kernel_cache[0, 1], _v)

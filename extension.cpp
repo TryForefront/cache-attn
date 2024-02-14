@@ -25,7 +25,7 @@ void cache_attn_function(torch::Tensor q, torch::Tensor k, torch::Tensor v, torc
 {
 
     int head_dim = q.size(-1);
-    int batch_size = q.size(2);
+    int batch_size = q.size(0);
     int seq_len = cache.size(-2);
     int num_kv_heads = k.size(1);
     int num_heads = q.size(1);
